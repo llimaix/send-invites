@@ -1,0 +1,31 @@
+flowchart LR
+    subgraph EC2["EC2 t4g.medium arm64 - Docker Compose"]
+        CADDY["Caddy - TLS Let's Encrypt"]
+        CW["Chatwoot"]
+        N8N["n8n"]
+        PG[("Postgres")]
+        RD[("Redis")]
+        CADDY -->|443| CW
+        CW --> PG
+        CW --> RD
+        N8N --> PG
+        N8N -->|API Chatwoot - red interna| CW
+        CW -->|webhook message_updated - red interna| N8N
+    end
+
+    META["WhatsApp Cloud API - Meta"]
+    INV["Invitado"]
+    DDB[("DynamoDB guests - phone-index - solo lectura")]
+    GS["Google Sheet - bitacora y control"]
+    LUIS["Luis"]
+
+    CW -->|Graph API: plantilla| META
+    META -->|webhook: estados y respuestas| CADDY
+    META <-->|WhatsApp| INV
+    INV -->|boton Confirmar| WEB["Sitio de la invitacion - RSVP"]
+    WEB --> DDB
+    N8N -->|Query RSVP| DDB
+    N8N <-->|lee y escribe estado| GS
+    LUIS -->|SSM port forwarding| N8N
+    LUIS -->|HTTPS| CADDY
+    LUIS -->|interruptor envio_activo| GS

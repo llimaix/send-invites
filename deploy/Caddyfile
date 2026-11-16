@@ -1,0 +1,35 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# Bloque reutilizable: filtro por IP (ADMIN_CIDR) + auth básica obligatoria.
+# ADMIN_CIDR está temporalmente en 0.0.0.0/0; cerrarlo a la IP /32 antes del envío real.
+(admin_only) {
+	@fuera not remote_ip {$ADMIN_CIDR}
+	respond @fuera "Forbidden" 403
+
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+}
+
+# Chatwoot: protegido por su propio login.
+# TEMPORAL: admin_only hasta terminar el onboarding (crear el superadmin); después quitar
+# la línea `import admin_only` para que quede público.
+chat.{$DOMAIN} {
+	import admin_only
+	encode zstd gzip
+	reverse_proxy chatwoot-rails:3000
+}
+
+# n8n: solo admin.
+n8n.{$DOMAIN} {
+	import admin_only
+	reverse_proxy n8n:5678
+}
+
+# Evolution API (manager en /manager): solo admin.
+evo.{$DOMAIN} {
+	import admin_only
+	reverse_proxy evolution:8080
+}

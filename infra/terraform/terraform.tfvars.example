@@ -1,0 +1,14 @@
+# Copiar a terraform.tfvars (ignorado por Git) y completar.
+
+# Tu IP pública actual en /32 (p. ej. curl -s https://checkip.amazonaws.com).
+# 0.0.0.0/0 se acepta solo de forma temporal (Caddy exige auth básica).
+admin_cidr = "203.0.113.10/32"
+
+# Tabla DynamoDB de RSVP de rodolfo-invite.
+guests_table_name = "rodolfo-invite-guests-prod"
+
+# Opcionales (tienen default):
+# instance_type    = "t4g.large"
+# root_volume_size = 30
+# key_name         = "rodo-invites"
+# domain           = "isdomana.com"
