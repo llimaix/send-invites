@@ -1,0 +1,227 @@
+# send-invites: Caddy + Chatwoot + Evolution API + n8n, con un Postgres y un Redis compartidos.
+# Solo Caddy publica puertos en el host (80/443). Todo lo demás vive en la red interna.
+# Variables: deploy/.env (generado en el servidor con scripts/gen-secrets.sh, nunca en Git).
+
+name: send-invites
+
+x-chatwoot: &chatwoot
+  image: chatwoot/chatwoot:v4.19.1-ce
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    - chatwoot_storage:/app/storage
+  environment:
+    NODE_ENV: production
+    RAILS_ENV: production
+    INSTALLATION_ENV: docker
+    RAILS_LOG_TO_STDOUT: "true"
+    SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE:?falta CHATWOOT_SECRET_KEY_BASE}
+    FRONTEND_URL: https://chat.${DOMAIN:?falta DOMAIN}
+    # Caddy termina TLS y redirige a HTTPS. Con FORCE_SSL=true Rails redirigiría también
+    # las llamadas internas por http (Evolution -> Chatwoot) y las rompería.
+    FORCE_SSL: "false"
+    ENABLE_ACCOUNT_SIGNUP: "false"
+    DEFAULT_LOCALE: es
+    TZ: America/Guatemala
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_DATABASE: chatwoot
+    POSTGRES_USERNAME: chatwoot
+    POSTGRES_PASSWORD: ${CHATWOOT_DB_PASSWORD:?falta CHATWOOT_DB_PASSWORD}
+    REDIS_URL: redis://redis:6379/0
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?falta REDIS_PASSWORD}
+    ACTIVE_STORAGE_SERVICE: local
+  networks: [internal]
+
+services:
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?falta ACME_EMAIL}
+      ADMIN_CIDR: ${ADMIN_CIDR:?falta ADMIN_CIDR}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?falta BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?falta BASIC_AUTH_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [chatwoot-rails, n8n, evolution]
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 128m }
+
+  postgres:
+    # Chatwoot necesita la extensión pgvector; su compose oficial usa pg16.
+    image: pgvector/pgvector:0.8.7-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?falta POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: postgres
+      # Solo los usa init.sh en el primer arranque (volumen vacío).
+      CHATWOOT_DB_PASSWORD: ${CHATWOOT_DB_PASSWORD}
+      EVOLUTION_DB_PASSWORD: ${EVOLUTION_DB_PASSWORD:?falta EVOLUTION_DB_PASSWORD}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?falta N8N_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 1g }
+
+  redis:
+    image: redis:8.8.4-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 256m }
+
+  chatwoot-rails:
+    <<: *chatwoot
+    entrypoint: docker/entrypoints/rails.sh
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+    deploy:
+      resources:
+        limits: { memory: 1536m }
+
+  chatwoot-sidekiq:
+    <<: *chatwoot
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+    deploy:
+      resources:
+        limits: { memory: 1g }
+
+  evolution:
+    # Último release estable (2025-12-05). Si el QR no vincula, plan B: v2.4.0-rc2.
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: America/Guatemala
+      SERVER_TYPE: http
+      SERVER_PORT: "8080"
+      # URL interna: Chatwoot la usa para devolver los mensajes salientes a Evolution
+      # sin pasar por Caddy (que exige auth básica). Verificar en el paso 2b.
+      SERVER_URL: http://evolution:8080
+      LANGUAGE: es
+      LOG_LEVEL: ERROR,WARN,INFO
+      DEL_INSTANCE: "false"
+      CONFIG_SESSION_PHONE_CLIENT: Send Invites
+      CONFIG_SESSION_PHONE_NAME: Chrome
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?falta EVOLUTION_API_KEY}
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://evolution:${EVOLUTION_DB_PASSWORD}@postgres:5432/evolution?schema=evolution_api
+      DATABASE_CONNECTION_CLIENT_NAME: evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "false"
+      # No importar el historial del chip: no hace falta y evita guardar chats ajenos.
+      DATABASE_SAVE_DATA_HISTORIC: "false"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379/6
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+      CHATWOOT_ENABLED: "true"
+      CHATWOOT_MESSAGE_READ: "true"
+      CHATWOOT_MESSAGE_DELETE: "true"
+      CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE: "false"
+      # Webhook global hacia n8n por la red interna (no pasa por Caddy).
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_URL: http://n8n:5678/webhook/evolution-eventos
+      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
+      WEBHOOK_EVENTS_MESSAGES_UPDATE: "true"
+      WEBHOOK_EVENTS_SEND_MESSAGE: "true"
+      WEBHOOK_EVENTS_CONNECTION_UPDATE: "true"
+      WEBHOOK_EVENTS_MESSAGES_SET: "false"
+      WEBHOOK_EVENTS_CONTACTS_SET: "false"
+      WEBHOOK_EVENTS_CONTACTS_UPSERT: "false"
+      WEBHOOK_EVENTS_CONTACTS_UPDATE: "false"
+      WEBHOOK_EVENTS_CHATS_SET: "false"
+      WEBHOOK_EVENTS_CHATS_UPSERT: "false"
+      WEBHOOK_EVENTS_CHATS_UPDATE: "false"
+      WEBHOOK_EVENTS_PRESENCE_UPDATE: "false"
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 768m }
+
+  n8n:
+    image: n8nio/n8n:2.47.7
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TZ: America/Guatemala
+      GENERIC_TIMEZONE: America/Guatemala
+      N8N_HOST: n8n.${DOMAIN}
+      N8N_PROTOCOL: https
+      N8N_PORT: "5678"
+      WEBHOOK_URL: https://n8n.${DOMAIN}/
+      N8N_PROXY_HOPS: "1"
+      # Si se pierde esta llave, se pierden las credenciales guardadas en n8n.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?falta N8N_ENCRYPTION_KEY}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 1g }
+
+networks:
+  internal:
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  redis_data:
+  chatwoot_storage:
+  evolution_instances:
+  n8n_data:

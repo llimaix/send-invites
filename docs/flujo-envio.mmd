@@ -1,0 +1,21 @@
+flowchart TD
+    A(["Cron n8n cada 3 min"]) --> B{"Hora entre 09:00 y 20:00 America/Guatemala?"}
+    B -- No --> Z(["Fin sin enviar"])
+    B -- Si --> C{"envio_activo = SI en la Sheet?"}
+    C -- No --> Z
+    C -- Si --> D["Sincronizar RSVP: Query guests phone-index por los 8 digitos de cada fila"]
+    D --> E["Marcar confirmado a quien tenga RSVP"]
+    E --> F{"Enviados hoy menor que tope diario 150?"}
+    F -- No --> Z
+    F -- Si --> G["Tomar hasta 5 filas en estado pendiente"]
+    G --> H{"Hay filas?"}
+    H -- No --> Z
+    H -- Si --> I["Marcar enviando ANTES de enviar"]
+    I --> J["Chatwoot API: crear o reutilizar contacto con telefono_e164, conversacion y enviar plantilla"]
+    J --> K{"Chatwoot acepto el mensaje?"}
+    K -- Si --> L["Guardar message_id y marcar enviado"]
+    K -- No --> M["Marcar fallido con codigo de error"]
+    L --> Z
+    M --> Z
+
+    W(["Webhook Chatwoot message_updated"]) --> X["Actualizar fila: entregado / leido / fallido con codigo"]

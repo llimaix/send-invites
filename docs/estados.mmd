@@ -1,0 +1,13 @@
+flowchart LR
+    P["pendiente"] -->|cron toma la fila| EN["enviando"]
+    EN -->|Chatwoot acepta| ENV["enviado"]
+    EN -->|error al enviar| F["fallido"]
+    ENV -->|webhook delivered| ENT["entregado"]
+    ENT -->|webhook read| L["leido"]
+    ENV -->|webhook failed| F
+    F -->|error recuperable, un solo reintento horas despues| P
+    P -.->|aparece RSVP| C["confirmado"]
+    ENV -.->|aparece RSVP| C
+    ENT -.->|aparece RSVP| C
+    L -.->|aparece RSVP| C
+    F -.->|aparece RSVP| C
