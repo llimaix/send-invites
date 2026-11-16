@@ -13,11 +13,8 @@
 	}
 }
 
-# Chatwoot: protegido por su propio login.
-# TEMPORAL: admin_only hasta terminar el onboarding (crear el superadmin); después quitar
-# la línea `import admin_only` para que quede público.
+# Chatwoot: público, protegido por su propio login (onboarding ya completado).
 chat.{$DOMAIN} {
-	import admin_only
 	encode zstd gzip
 	reverse_proxy chatwoot-rails:3000
 }
