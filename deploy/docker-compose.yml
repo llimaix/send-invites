@@ -35,6 +35,9 @@ x-chatwoot: &chatwoot
     REDIS_URL: redis://redis:6379/0
     REDIS_PASSWORD: ${REDIS_PASSWORD:?falta REDIS_PASSWORD}
     ACTIVE_STORAGE_SERVICE: local
+    # Chatwoot v4 (SafeFetch) bloquea por defecto las URLs que resuelven a IPs privadas,
+    # y el webhook interno http://evolution:8080 es una de ellas.
+    SAFE_FETCH_ALLOW_PRIVATE_NETWORK: "true"
   networks: [internal]
 
 services:
