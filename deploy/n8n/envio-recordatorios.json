@@ -1,0 +1,194 @@
+{
+  "name": "envio-recordatorios",
+  "nodes": [
+    {
+      "id": "a1",
+      "name": "Cada minuto",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a2",
+      "name": "Tomar siguiente",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "postgres-invites"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Toma UNA fila pendiente si se cumplen todas las reglas y la marca 'enviando'\n-- en la misma sentencia (nadie más puede tomarla). Si no toca enviar, no devuelve filas.\nWITH ultimo AS (\n  SELECT telefono, enviado_en FROM invites.envios\n  WHERE enviado_en IS NOT NULL ORDER BY enviado_en DESC LIMIT 1\n), permitido AS (\n  SELECT 1 WHERE\n    -- horario 08:00-21:00 America/Guatemala\n    (now() AT TIME ZONE 'America/Guatemala')::time >= time '08:00'\n    AND (now() AT TIME ZONE 'America/Guatemala')::time <  time '21:00'\n    -- tope 30 por dia (dia de Guatemala)\n    AND (SELECT count(*) FROM invites.envios\n         WHERE enviado_en >= (date_trunc('day', now() AT TIME ZONE 'America/Guatemala') AT TIME ZONE 'America/Guatemala')) < 30\n    -- si quedo algo 'enviando' (fallo a medias), se detiene hasta revisarlo a mano\n    AND NOT EXISTS (SELECT 1 FROM invites.envios WHERE estado = 'enviando')\n    -- espera de 15 a 22 min desde el ultimo envio (pseudoaleatoria, derivada del ultimo telefono)\n    AND NOT EXISTS (SELECT 1 FROM ultimo u\n                    WHERE now() < u.enviado_en + make_interval(mins => 15 + ((hashtext(u.telefono) % 8) + 8) % 8))\n), elegido AS (\n  SELECT telefono FROM invites.envios\n  WHERE estado = 'pendiente' AND EXISTS (SELECT 1 FROM permitido)\n  ORDER BY (nombre = 'PRUEBA') DESC, random()   -- una fila PRUEBA pendiente sale primero\n  LIMIT 1\n  FOR UPDATE SKIP LOCKED\n)\nUPDATE invites.envios e\nSET estado = 'enviando', intentos = e.intentos + 1, enviado_en = now(), actualizado_en = now()\nFROM elegido\nWHERE e.telefono = elegido.telefono\nRETURNING e.telefono, e.nombre;",
+        "options": {}
+      }
+    },
+    {
+      "id": "a3",
+      "name": "Preparar mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Arma el cuerpo para Evolution. Si la consulta no devolvió fila, no sigue.\nconst TEXTO = \"Hola, te recordamos con mucho cariño que contamos con tu presencia en la celebración de los 60 años de Edvin.\\n\\n📅 Sábado 26 de diciembre de 2026\\n🕟 4:30 p. m.\\n📍 Turicentro El Paraíso, 9a Calle, Zona 5, Villa Nueva\\n\\nSi aún no has confirmado, puedes hacerlo aquí usando este mismo número de teléfono:\\nhttps://rodolfo60s.isdomana.com\\n\\n¡Te esperamos con mucho cariño para celebrar juntos esta gran bendición! ❤️🎊\";\nconst salida = [];\n$input.all().forEach((item, i) => {\n  const tel = item.json.telefono;\n  if (typeof tel === 'string' && /^\\+[1-9][0-9]{7,14}$/.test(tel)) {\n    salida.push({\n      json: { telefono: tel, number: tel.slice(1), text: TEXTO, delay: 3000 },\n      pairedItem: { item: i },\n    });\n  }\n});\nreturn salida;"
+      }
+    },
+    {
+      "id": "a4",
+      "name": "Enviar por Evolution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "evolution-api"
+        }
+      },
+      "parameters": {
+        "method": "POST",
+        "url": "http://evolution:8080/message/sendText/Recordatorio",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.number, text: $json.text, delay: $json.delay }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "a5",
+      "name": "Marcar enviado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        900,
+        -100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "postgres-invites"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE invites.envios\nSET estado = 'enviado', wa_message_id = nullif($2, ''), error = NULL, actualizado_en = now()\nWHERE telefono = $1 AND estado = 'enviando';",
+        "options": {
+          "queryReplacement": "={{ [ $('Preparar mensaje').item.json.telefono, $json.key?.id ?? '' ] }}"
+        }
+      }
+    },
+    {
+      "id": "a6",
+      "name": "Marcar fallido",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        900,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "postgres-invites"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE invites.envios\nSET estado = 'fallido', error = left($2, 1000), actualizado_en = now()\nWHERE telefono = $1 AND estado = 'enviando';",
+        "options": {
+          "queryReplacement": "={{ [ $('Preparar mensaje').item.json.telefono, JSON.stringify($json.error ?? $json) ] }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cada minuto": {
+      "main": [
+        [
+          {
+            "node": "Tomar siguiente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tomar siguiente": {
+      "main": [
+        [
+          {
+            "node": "Preparar mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar mensaje": {
+      "main": [
+        [
+          {
+            "node": "Enviar por Evolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar por Evolution": {
+      "main": [
+        [
+          {
+            "node": "Marcar enviado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar fallido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Guatemala",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "pinData": {}
+}
