@@ -6,8 +6,9 @@
 #   scripts/importar-sheet.sh /ruta/recordatorio.csv            # simulacro: muestra conteos y deshace
 #   scripts/importar-sheet.sh /ruta/recordatorio.csv --aplicar  # guarda los cambios
 #
-# CSV esperado (Archivo > Descargar > CSV en Google Sheets), con o sin la columna estado:
-#   Nombre,Telefono,Invitados[,estado]
+# CSV esperado (Archivo > Descargar > CSV en Google Sheets), con o sin la columna Estado
+# (el encabezado no distingue mayúsculas):
+#   Nombre,Telefono,Invitados[,Estado]
 #
 # Qué hace, en una sola transacción:
 #   - Inserta como 'pendiente' los teléfonos nuevos.
@@ -30,13 +31,35 @@ case "$MODO" in
   *)         uso ;;
 esac
 
-# Encabezado: sin BOM ni \r. Define cuántas columnas carga COPY.
-ENCABEZADO="$(head -n 1 "$CSV" | sed $'s/^\xEF\xBB\xBF//; s/\r$//')"
+# Encabezado: sin BOM ni \r, sin distinguir mayúsculas. Define cuántas columnas carga COPY.
+ENCABEZADO="$(head -n 1 "$CSV" | sed $'s/^\xEF\xBB\xBF//; s/\r$//' | tr '[:upper:]' '[:lower:]')"
 case "$ENCABEZADO" in
-  "Nombre,Telefono,Invitados")        COLUMNAS="nombre, telefono, invitados" ;;
-  "Nombre,Telefono,Invitados,estado") COLUMNAS="nombre, telefono, invitados, estado_sheet" ;;
-  *) echo "Encabezado inesperado: '$ENCABEZADO' (se espera Nombre,Telefono,Invitados[,estado])" >&2; exit 1 ;;
+  "nombre,telefono,invitados")        COLUMNAS="nombre, telefono, invitados";               NCOL=3 ;;
+  "nombre,telefono,invitados,estado") COLUMNAS="nombre, telefono, invitados, estado_sheet"; NCOL=4 ;;
+  *) echo "Encabezado inesperado: '$ENCABEZADO' (se espera Nombre,Telefono,Invitados[,Estado])" >&2; exit 1 ;;
 esac
+
+# Normaliza los datos ANTES de tocar Postgres, para no mandarle nunca un CSV a medias.
+# Google Sheets omite las celdas vacías del final de cada fila: se completan con comas.
+# El conteo de columnas respeta comillas ("D'León, Juan" es una sola columna).
+DATOS="$(mktemp "${TMPDIR:-/tmp}/importar-sheet.XXXXXX")"
+trap 'rm -f "$DATOS"' EXIT
+awk -v n="$NCOL" '
+  NR == 1 { next }
+  {
+    sub(/\r$/, "")
+    if (!length($0)) next
+    c = 1; q = 0
+    for (i = 1; i <= length($0); i++) {
+      ch = substr($0, i, 1)
+      if (ch == "\"") q = !q
+      else if (ch == "," && !q) c++
+    }
+    if (q) { printf "Fila %d de la hoja: comillas sin cerrar\n", NR > "/dev/stderr"; exit 3 }
+    if (c > n) { printf "Fila %d de la hoja: %d columnas, se esperan %d\n", NR, c, n > "/dev/stderr"; exit 3 }
+    while (c < n) { $0 = $0 ","; c++ }
+    print
+  }' "$CSV" > "$DATOS" || { echo "No se tocó la base de datos." >&2; exit 1; }
 
 # Permite probar el script sin servidor (PSQL="cat" muestra lo que se enviaría).
 PSQL="${PSQL:-docker compose --project-directory $DEPLOY_DIR exec -T postgres psql -X -q -U n8n -d n8n -v ON_ERROR_STOP=1}"
@@ -50,8 +73,7 @@ CREATE TEMP TABLE carga (
 ) ON COMMIT DROP;
 COPY carga ($COLUMNAS) FROM STDIN WITH (FORMAT csv);
 SQL
-  # Datos sin encabezado, sin \r y sin líneas vacías (COPY falla con ellas).
-  awk 'NR > 1 { sub(/\r$/, ""); if (length($0)) print }' "$CSV"
+  cat "$DATOS"
   printf '%s\n' '\.'
   cat <<'SQL'
 UPDATE carga SET nombre    = btrim(nombre),
